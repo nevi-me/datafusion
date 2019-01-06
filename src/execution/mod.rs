@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Relational Sort
-
-//pub struct SortRelation {
-//    schema: Schema,
-//    input: Box<SimpleRelation>,
-//    sort_expr: Vec<CompiledExpr>,
-//    sort_asc: Vec<bool>
-//}
-
+pub mod aggregate;
+pub mod context;
+pub mod datasource;
+pub mod error;
+pub mod expression;
+pub mod filter;
+pub mod physicalplan;
+pub mod projection;
+pub mod relation;
+pub mod value;

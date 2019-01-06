@@ -18,17 +18,16 @@ extern crate datafusion;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
-use std::rc::Rc;
 use std::str;
 use std::time::Instant;
 
 use clap::{App, Arg};
-use datafusion::exec::*;
-use datafusion::functions::geospatial::st_astext::*;
-use datafusion::functions::geospatial::st_point::*;
-use datafusion::functions::math::*;
-use datafusion::dfparser::DFParser;
+//use datafusion::functions::geospatial::st_astext::*;
+//use datafusion::functions::geospatial::st_point::*;
+//use datafusion::functions::math::*;
 use datafusion::dfparser::DFASTNode::CreateExternalTable;
+use datafusion::dfparser::DFParser;
+use datafusion::execution::context::ExecutionContext;
 mod linereader;
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -43,16 +42,15 @@ fn setup_console(cmdline: clap::ArgMatches) {
         Some(filename) => match File::open(filename) {
             Ok(f) => {
                 let mut cmd_buffer = String::new();
-                let mut reader = BufReader::new(&f);
+                let reader = BufReader::new(&f);
                 for line in reader.lines() {
                     match line {
                         Ok(cmd) => {
                             cmd_buffer.push_str(&cmd);
                             if cmd_buffer.as_str().ends_with(";") {
-                                console.execute(&cmd_buffer[0..cmd_buffer.len() - 1]);
+                                console.execute(&cmd_buffer[0..cmd_buffer.len() - 2]);
                                 cmd_buffer = String::new();
                             }
-                            cmd_buffer.push_str("\n");
                         }
                         Err(e) => println!("Error: {}", e),
                     }
@@ -91,25 +89,25 @@ fn main() {
     //    println!("");
 
     let cmdline = App::new("DataFusion Console")
-            .version(VERSION)
-//            .arg(
-//                Arg::with_name("ETCD")
-//                    .help("etcd endpoints")
-//                    .short("e")
-//                    .long("etcd")
-//                    .value_name("URL")
-//                    .required(true)
-//                    .takes_value(true),
-//            )
-            .arg(
-                Arg::with_name("SCRIPT")
-                    .help("SQL script to run")
-                    .short("s")
-                    .long("script")
-                    .required(false)
-                    .takes_value(true),
-            )
-            .get_matches();
+        .version(VERSION)
+        //            .arg(
+        //                Arg::with_name("ETCD")
+        //                    .help("etcd endpoints")
+        //                    .short("e")
+        //                    .long("etcd")
+        //                    .value_name("URL")
+        //                    .required(true)
+        //                    .takes_value(true),
+        //            )
+        .arg(
+            Arg::with_name("SCRIPT")
+                .help("SQL script to run")
+                .short("s")
+                .long("script")
+                .required(false)
+                .takes_value(true),
+        )
+        .get_matches();
     setup_console(cmdline);
 }
 
@@ -121,10 +119,10 @@ struct Console {
 impl Console {
     /// Create a new instance of the console
     fn new() -> Self {
-        let mut ctx = ExecutionContext::local();
-        ctx.register_scalar_function(Rc::new(STPointFunc {}));
-        ctx.register_scalar_function(Rc::new(STAsText {}));
-        ctx.register_scalar_function(Rc::new(SqrtFunction {}));
+        let ctx = ExecutionContext::new();
+        //        ctx.register_scalar_function(Rc::new(STPointFunc {}));
+        //        ctx.register_scalar_function(Rc::new(STAsText {}));
+        //        ctx.register_scalar_function(Rc::new(SqrtFunction {}));
         Console { ctx }
     }
 
@@ -142,37 +140,11 @@ impl Console {
                     //println!("Registered schema with execution context");
                     ()
                 }
-                _ => match self.ctx.create_logical_plan(sql) {
-                    Ok(logical_plan) => {
-                        let physical_plan = PhysicalPlan::Interactive {
-                            plan: logical_plan.clone(),
-                        };
-
-                        let result = self.ctx.execute(&physical_plan);
-
-                        match result {
-                            Ok(result) => {
-                                let elapsed = timer.elapsed();
-                                let elapsed_seconds = elapsed.as_secs() as f64
-                                    + elapsed.subsec_nanos() as f64 / 1000000000.0;
-
-                                match result {
-                                    ExecutionResult::Unit => {
-                                        println!("Query executed in {} seconds", elapsed_seconds);
-                                    }
-                                    ExecutionResult::Count(n) => {
-                                        println!(
-                                            "Query executed in {} seconds and updated {} rows",
-                                            elapsed_seconds, n
-                                        );
-                                    }
-                                    ExecutionResult::Str(_) => {
-                                        println!("Query executed in {} seconds", elapsed_seconds);
-                                    }
-                                }
-                            }
-                            Err(e) => println!("Error: {:?}", e),
-                        }
+                _ => match self.ctx.sql(sql) {
+                    Ok(_result) => {
+                        let elapsed = timer.elapsed();
+                        let _elapsed_seconds =
+                            elapsed.as_secs() as f64 + elapsed.subsec_nanos() as f64 / 1000000000.0;
                     }
                     Err(e) => println!("Error: {:?}", e),
                 },

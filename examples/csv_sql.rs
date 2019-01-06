@@ -12,44 +12,78 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 extern crate arrow;
 extern crate datafusion;
 
-use arrow::datatypes::*;
-use datafusion::exec::*;
-use datafusion::functions::geospatial::st_astext::*;
-use datafusion::functions::geospatial::st_point::*;
+use arrow::array::{BinaryArray, Float64Array};
+use arrow::datatypes::{DataType, Field, Schema};
+
+use datafusion::execution::context::ExecutionContext;
+use datafusion::execution::datasource::CsvDataSource;
 
 /// This example shows the steps to parse, plan, and execute simple SQL in the current process
 fn main() {
-    // create execution context
-    let mut ctx = ExecutionContext::local();
-    ctx.register_scalar_function(Rc::new(STPointFunc {}));
-    ctx.register_scalar_function(Rc::new(STAsText {}));
+    // create local execution context
+    let mut ctx = ExecutionContext::new();
 
     // define schema for data source (csv file)
-    let schema = Schema::new(vec![
+    let schema = Arc::new(Schema::new(vec![
         Field::new("city", DataType::Utf8, false),
         Field::new("lat", DataType::Float64, false),
         Field::new("lng", DataType::Float64, false),
-    ]);
+    ]));
 
-    // open a CSV file as a dataframe
-    let uk_cities = ctx
-        .load_csv("test/data/uk_cities.csv", &schema, false, None)
-        .unwrap();
-    println!("uk_cities schema: {}", uk_cities.schema().to_string());
+    // register csv file with the execution context
+    let csv_datasource = CsvDataSource::new("test/data/uk_cities.csv", schema.clone(), 1024);
+    ctx.register_datasource("cities", Rc::new(RefCell::new(csv_datasource)));
 
-    ctx.register("uk_cities", uk_cities);
+    // simple projection and selection
+    let sql = "SELECT city, lat, lng FROM cities WHERE lat > 51.0 AND lat < 53";
 
-    // define the SQL statement
-    let sql = "SELECT ST_AsText(ST_Point(lat, lng)) FROM uk_cities WHERE lat < 53.0";
+    // execute the query
+    let results = ctx.sql(&sql).unwrap();
 
-    // create a data frame
-    let df1 = ctx.sql(&sql).unwrap();
+    // display the results
+    let mut ref_mut = results.borrow_mut();
+    match ref_mut.next().unwrap() {
+        Some(batch) => {
+            println!(
+                "First batch has {} rows and {} columns",
+                batch.num_rows(),
+                batch.num_columns()
+            );
 
-    // show the first 10 rows of output
-    df1.show(10)
+            let city = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap();
+            let lat = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let lng = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+
+            for i in 0..batch.num_rows() {
+                let city_name: String = String::from_utf8(city.get_value(i).to_vec()).unwrap();
+
+                println!(
+                    "City: {}, Latitude: {}, Longitude: {}",
+                    city_name,
+                    lat.value(i),
+                    lng.value(i),
+                );
+            }
+        }
+        _ => println!("No results"),
+    }
 }

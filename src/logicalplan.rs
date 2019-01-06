@@ -12,17 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Logical plan
+//! Logical query plan
 
 use std::fmt;
 use std::fmt::{Error, Formatter};
 use std::rc::Rc;
-
-use super::types::*;
+use std::sync::Arc;
 
 use arrow::datatypes::*;
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum FunctionType {
     Scalar,
     Aggregate,
@@ -64,7 +63,7 @@ impl FunctionMeta {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Operator {
     Eq,
     NotEq,
@@ -79,6 +78,7 @@ pub enum Operator {
     Modulus,
     And,
     Or,
+    Like,
 }
 
 impl Operator {
@@ -89,8 +89,48 @@ impl Operator {
     }
 }
 
+/// ScalarValue enumeration
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum ScalarValue {
+    Null,
+    Boolean(bool),
+    Float32(f32),
+    Float64(f64),
+    Int8(i8),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    UInt8(u8),
+    UInt16(u16),
+    UInt32(u32),
+    UInt64(u64),
+    Utf8(Rc<String>),
+    Struct(Vec<ScalarValue>),
+}
+
+impl ScalarValue {
+    pub fn get_datatype(&self) -> DataType {
+        match *self {
+            ScalarValue::Boolean(_) => DataType::Boolean,
+            ScalarValue::UInt8(_) => DataType::UInt8,
+            ScalarValue::UInt16(_) => DataType::UInt16,
+            ScalarValue::UInt32(_) => DataType::UInt32,
+            ScalarValue::UInt64(_) => DataType::UInt64,
+            ScalarValue::Int8(_) => DataType::Int8,
+            ScalarValue::Int16(_) => DataType::Int16,
+            ScalarValue::Int32(_) => DataType::Int32,
+            ScalarValue::Int64(_) => DataType::Int64,
+            ScalarValue::Float32(_) => DataType::Float32,
+            ScalarValue::Float64(_) => DataType::Float64,
+            ScalarValue::Utf8(_) => DataType::Utf8,
+            ScalarValue::Struct(_) => unimplemented!(),
+            ScalarValue::Null => unimplemented!(),
+        }
+    }
+}
+
 /// Relation Expression
-#[derive(Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub enum Expr {
     /// index into a value within the row or complex value
     Column(usize),
@@ -127,7 +167,7 @@ pub enum Expr {
 impl Expr {
     pub fn get_type(&self, schema: &Schema) -> DataType {
         match self {
-            Expr::Column(n) => schema.column(*n).data_type().clone(),
+            Expr::Column(n) => schema.field(*n).data_type().clone(),
             Expr::Literal(l) => l.get_datatype(),
             Expr::Cast { data_type, .. } => data_type.clone(),
             Expr::ScalarFunction { return_type, .. } => return_type.clone(),
@@ -230,11 +270,13 @@ impl fmt::Debug for Expr {
             Expr::IsNull(expr) => write!(f, "{:?} IS NULL", expr),
             Expr::IsNotNull(expr) => write!(f, "{:?} IS NOT NULL", expr),
             Expr::BinaryExpr { left, op, right } => write!(f, "{:?} {:?} {:?}", left, op, right),
-            Expr::Sort { expr, asc } => if *asc {
-                write!(f, "{:?} ASC", expr)
-            } else {
-                write!(f, "{:?} DESC", expr)
-            },
+            Expr::Sort { expr, asc } => {
+                if *asc {
+                    write!(f, "{:?} ASC", expr)
+                } else {
+                    write!(f, "{:?} DESC", expr)
+                }
+            }
             Expr::ScalarFunction { name, ref args, .. } => {
                 write!(f, "{}(", name)?;
                 for i in 0..args.len() {
@@ -263,19 +305,19 @@ impl fmt::Debug for Expr {
 
 /// The LogicalPlan represents different types of relations (such as Projection, Selection, etc) and
 /// can be created by the SQL query planner and the DataFrame API.
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum LogicalPlan {
     /// A relation that applies a row limit to its child relation
     Limit {
         limit: usize,
         input: Rc<LogicalPlan>,
-        schema: Rc<Schema>,
+        schema: Arc<Schema>,
     },
     /// A Projection (essentially a SELECT with an expression list)
     Projection {
         expr: Vec<Expr>,
         input: Rc<LogicalPlan>,
-        schema: Rc<Schema>,
+        schema: Arc<Schema>,
     },
     /// A Selection (essentially a WHERE clause with a predicate expression)
     Selection { expr: Expr, input: Rc<LogicalPlan> },
@@ -284,53 +326,31 @@ pub enum LogicalPlan {
         input: Rc<LogicalPlan>,
         group_expr: Vec<Expr>,
         aggr_expr: Vec<Expr>,
-        schema: Rc<Schema>,
+        schema: Arc<Schema>,
     },
     /// Represents a list of sort expressions to be applied to a relation
     Sort {
         expr: Vec<Expr>,
         input: Rc<LogicalPlan>,
-        schema: Rc<Schema>,
+        schema: Arc<Schema>,
     },
     /// A table scan against a table that has been registered on a context
     TableScan {
         schema_name: String,
         table_name: String,
-        schema: Rc<Schema>,
-        projection: Option<Vec<usize>>,
-    },
-    /// Represents a CSV file with a provided schema
-    CsvFile {
-        filename: String,
-        schema: Rc<Schema>,
-        has_header: bool,
-        projection: Option<Vec<usize>>,
-    },
-    /// Represents an ndjson file with a provided schema
-    NdJsonFile {
-        filename: String,
-        schema: Rc<Schema>,
-        projection: Option<Vec<usize>>,
-    },
-    /// Represents a Parquet file that contains schema information
-    ParquetFile {
-        filename: String,
-        schema: Rc<Schema>,
+        schema: Arc<Schema>,
         projection: Option<Vec<usize>>,
     },
     /// An empty relation with an empty schema
-    EmptyRelation { schema: Rc<Schema> },
+    EmptyRelation { schema: Arc<Schema> },
 }
 
 impl LogicalPlan {
     /// Get a reference to the logical plan's schema
-    pub fn schema(&self) -> &Rc<Schema> {
+    pub fn schema(&self) -> &Arc<Schema> {
         match self {
             LogicalPlan::EmptyRelation { schema } => &schema,
             LogicalPlan::TableScan { schema, .. } => &schema,
-            LogicalPlan::CsvFile { schema, .. } => &schema,
-            LogicalPlan::NdJsonFile { schema, .. } => &schema,
-            LogicalPlan::ParquetFile { schema, .. } => &schema,
             LogicalPlan::Projection { schema, .. } => &schema,
             LogicalPlan::Selection { input, .. } => input.schema(),
             LogicalPlan::Aggregate { schema, .. } => &schema,
@@ -355,17 +375,6 @@ impl LogicalPlan {
                 ref projection,
                 ..
             } => write!(f, "TableScan: {} projection={:?}", table_name, projection),
-            LogicalPlan::CsvFile {
-                ref filename,
-                ref schema,
-                ..
-            } => write!(f, "CsvFile: file={}, schema={:?}", filename, schema),
-            LogicalPlan::NdJsonFile {
-                ref filename,
-                ref schema,
-                ..
-            } => write!(f, "NdJsonFile: file={}, schema={:?}", filename, schema),
-            LogicalPlan::ParquetFile { .. } => write!(f, "ParquetFile:"),
             LogicalPlan::Projection {
                 ref expr,
                 ref input,
@@ -428,5 +437,214 @@ impl LogicalPlan {
 impl fmt::Debug for LogicalPlan {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
         self.fmt_with_indent(f, 0)
+    }
+}
+
+//TODO move to Arrow DataType impl?
+pub fn get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
+    match _get_supertype(l, r) {
+        Some(dt) => Some(dt),
+        None => match _get_supertype(r, l) {
+            Some(dt) => Some(dt),
+            None => None,
+        },
+    }
+}
+
+fn _get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
+    use self::DataType::*;
+    match (l, r) {
+        (UInt8, Int8) => Some(Int8),
+        (UInt8, Int16) => Some(Int16),
+        (UInt8, Int32) => Some(Int32),
+        (UInt8, Int64) => Some(Int64),
+
+        (UInt16, Int16) => Some(Int16),
+        (UInt16, Int32) => Some(Int32),
+        (UInt16, Int64) => Some(Int64),
+
+        (UInt32, Int32) => Some(Int32),
+        (UInt32, Int64) => Some(Int64),
+
+        (UInt64, Int64) => Some(Int64),
+
+        (Int8, UInt8) => Some(Int8),
+
+        (Int16, UInt8) => Some(Int16),
+        (Int16, UInt16) => Some(Int16),
+
+        (Int32, UInt8) => Some(Int32),
+        (Int32, UInt16) => Some(Int32),
+        (Int32, UInt32) => Some(Int32),
+
+        (Int64, UInt8) => Some(Int64),
+        (Int64, UInt16) => Some(Int64),
+        (Int64, UInt32) => Some(Int64),
+        (Int64, UInt64) => Some(Int64),
+
+        (UInt8, UInt8) => Some(UInt8),
+        (UInt8, UInt16) => Some(UInt16),
+        (UInt8, UInt32) => Some(UInt32),
+        (UInt8, UInt64) => Some(UInt64),
+        (UInt8, Float32) => Some(Float32),
+        (UInt8, Float64) => Some(Float64),
+
+        (UInt16, UInt8) => Some(UInt16),
+        (UInt16, UInt16) => Some(UInt16),
+        (UInt16, UInt32) => Some(UInt32),
+        (UInt16, UInt64) => Some(UInt64),
+        (UInt16, Float32) => Some(Float32),
+        (UInt16, Float64) => Some(Float64),
+
+        (UInt32, UInt8) => Some(UInt32),
+        (UInt32, UInt16) => Some(UInt32),
+        (UInt32, UInt32) => Some(UInt32),
+        (UInt32, UInt64) => Some(UInt64),
+        (UInt32, Float32) => Some(Float32),
+        (UInt32, Float64) => Some(Float64),
+
+        (UInt64, UInt8) => Some(UInt64),
+        (UInt64, UInt16) => Some(UInt64),
+        (UInt64, UInt32) => Some(UInt64),
+        (UInt64, UInt64) => Some(UInt64),
+        (UInt64, Float32) => Some(Float32),
+        (UInt64, Float64) => Some(Float64),
+
+        (Int8, Int8) => Some(Int8),
+        (Int8, Int16) => Some(Int16),
+        (Int8, Int32) => Some(Int32),
+        (Int8, Int64) => Some(Int64),
+        (Int8, Float32) => Some(Float32),
+        (Int8, Float64) => Some(Float64),
+
+        (Int16, Int8) => Some(Int16),
+        (Int16, Int16) => Some(Int16),
+        (Int16, Int32) => Some(Int32),
+        (Int16, Int64) => Some(Int64),
+        (Int16, Float32) => Some(Float32),
+        (Int16, Float64) => Some(Float64),
+
+        (Int32, Int8) => Some(Int32),
+        (Int32, Int16) => Some(Int32),
+        (Int32, Int32) => Some(Int32),
+        (Int32, Int64) => Some(Int64),
+        (Int32, Float32) => Some(Float32),
+        (Int32, Float64) => Some(Float64),
+
+        (Int64, Int8) => Some(Int64),
+        (Int64, Int16) => Some(Int64),
+        (Int64, Int32) => Some(Int64),
+        (Int64, Int64) => Some(Int64),
+        (Int64, Float32) => Some(Float32),
+        (Int64, Float64) => Some(Float64),
+
+        (Float32, Float32) => Some(Float32),
+        (Float32, Float64) => Some(Float64),
+        (Float64, Float32) => Some(Float64),
+        (Float64, Float64) => Some(Float64),
+
+        (Utf8, Utf8) => Some(Utf8),
+
+        (Boolean, Boolean) => Some(Boolean),
+
+        _ => None,
+    }
+}
+
+pub fn can_coerce_from(left: &DataType, other: &DataType) -> bool {
+    use self::DataType::*;
+    match left {
+        Int8 => match other {
+            Int8 => true,
+            _ => false,
+        },
+        Int16 => match other {
+            Int8 | Int16 => true,
+            _ => false,
+        },
+        Int32 => match other {
+            Int8 | Int16 | Int32 => true,
+            _ => false,
+        },
+        Int64 => match other {
+            Int8 | Int16 | Int32 | Int64 => true,
+            _ => false,
+        },
+        UInt8 => match other {
+            UInt8 => true,
+            _ => false,
+        },
+        UInt16 => match other {
+            UInt8 | UInt16 => true,
+            _ => false,
+        },
+        UInt32 => match other {
+            UInt8 | UInt16 | UInt32 => true,
+            _ => false,
+        },
+        UInt64 => match other {
+            UInt8 | UInt16 | UInt32 | UInt64 => true,
+            _ => false,
+        },
+        Float32 => match other {
+            Int8 | Int16 | Int32 | Int64 => true,
+            UInt8 | UInt16 | UInt32 | UInt64 => true,
+            Float32 => true,
+            _ => false,
+        },
+        Float64 => match other {
+            Int8 | Int16 | Int32 | Int64 => true,
+            UInt8 | UInt16 | UInt32 | UInt64 => true,
+            Float32 | Float64 => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json;
+
+    #[test]
+    fn serialize_plan() {
+        let schema = Schema::new(vec![
+            Field::new("first_name", DataType::Utf8, false),
+            Field::new("last_name", DataType::Utf8, false),
+            Field::new(
+                "address",
+                DataType::Struct(vec![
+                    Field::new("street", DataType::Utf8, false),
+                    Field::new("zip", DataType::UInt16, false),
+                ]),
+                false,
+            ),
+        ]);
+
+        let plan = LogicalPlan::TableScan {
+            schema_name: "".to_string(),
+            table_name: "people".to_string(),
+            schema: Arc::new(schema),
+            projection: Some(vec![0, 1, 4]),
+        };
+
+        let serialized = serde_json::to_string(&plan).unwrap();
+
+        assert_eq!(
+            "{\"TableScan\":{\
+             \"schema_name\":\"\",\
+             \"table_name\":\"people\",\
+             \"schema\":{\"fields\":[\
+             {\"name\":\"first_name\",\"data_type\":\"Utf8\",\"nullable\":false},\
+             {\"name\":\"last_name\",\"data_type\":\"Utf8\",\"nullable\":false},\
+             {\"name\":\"address\",\"data_type\":{\"Struct\":\
+             [\
+             {\"name\":\"street\",\"data_type\":\"Utf8\",\"nullable\":false},\
+             {\"name\":\"zip\",\"data_type\":\"UInt16\",\"nullable\":false}]},\"nullable\":false}\
+             ]},\
+             \"projection\":[0,1,4]}}",
+            serialized
+        );
     }
 }

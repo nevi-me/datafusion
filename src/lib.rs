@@ -12,31 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # DataFusion
-//!
-//! DataFusion is a SQL parser, planner, and query execution library for Rust. It is data source
-//! agnostic but provides implementations for CSV and Apache Parquet file formats. A DataFrame API
-//! is also provided.
+//! DataFusion is a modern distributed compute platform implemented in Rust that uses Apache Arrow
+//! as the memory model
 
 extern crate arrow;
-extern crate byteorder;
-extern crate bytes;
-extern crate clap;
-extern crate csv;
-extern crate datafusion_rustyline;
-extern crate fnv;
-extern crate json;
-extern crate parquet;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde_json;
 extern crate sqlparser;
 
-pub mod dataframe;
-pub mod datasources;
 pub mod dfparser;
-#[macro_use]
-pub mod errors;
-pub mod exec;
-pub mod functions;
-pub mod logical;
-pub mod relations;
+pub mod execution;
+pub mod logicalplan;
 pub mod sqlplanner;
-pub mod types;

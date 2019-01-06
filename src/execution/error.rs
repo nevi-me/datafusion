@@ -17,13 +17,9 @@
 use std::io::Error;
 use std::result;
 
-use sqlparser::sqlparser::ParserError;
+use arrow::error::ArrowError;
 
-macro_rules! df_error {
-    ($MSG:expr) => {
-        ExecutionError::from($MSG)
-    };
-}
+use sqlparser::sqlparser::ParserError;
 
 pub type Result<T> = result::Result<T, ExecutionError>;
 
@@ -33,7 +29,10 @@ pub enum ExecutionError {
     ParserError(ParserError),
     General(String),
     InvalidColumn(String),
-    NotImplemented,
+    NotImplemented(String),
+    InternalError(String),
+    ArrowError(ArrowError),
+    ExecutionError(String),
 }
 
 impl From<Error> for ExecutionError {
@@ -51,6 +50,12 @@ impl From<String> for ExecutionError {
 impl From<&'static str> for ExecutionError {
     fn from(e: &'static str) -> Self {
         ExecutionError::General(e.to_string())
+    }
+}
+
+impl From<ArrowError> for ExecutionError {
+    fn from(e: ArrowError) -> Self {
+        ExecutionError::ArrowError(e)
     }
 }
 

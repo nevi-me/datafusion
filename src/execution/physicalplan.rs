@@ -12,11 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Defines data sources supported by DataFusion
+use super::super::logicalplan::LogicalPlan;
+use std::rc::Rc;
 
-pub mod common;
-pub mod csv;
-pub mod empty;
-pub mod ndjson;
-pub mod parquet;
-//pub mod quiver;
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum PhysicalPlan {
+    /// Run a query and return the results to the client
+    Interactive {
+        plan: Rc<LogicalPlan>,
+    },
+    /// Execute a logical plan and write the output to a file
+    Write {
+        plan: Rc<LogicalPlan>,
+        filename: String,
+        kind: String,
+    },
+    Show {
+        plan: Rc<LogicalPlan>,
+        count: usize,
+    },
+}

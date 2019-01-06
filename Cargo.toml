@@ -1,47 +1,48 @@
 [package]
 name = "datafusion"
-description = "DataFusion is a SQL parser, planner, and execution framework for Rust with support for CSV and Apache Parquet file formats"
-version = "0.3.4-alpha.0"
+description = "DataFusion is a modern distributed compute platform that uses Apache Arrow as the memory model"
+version = "0.5.3-alpha.0"
 authors = ["Andy Grove <andygrove73@gmail.com>"]
-homepage = "https://datafusion.rs"
+homepage = "https://github.com/andygrove/datafusion"
 documentation = "https://datafusion.rs/docs/datafusion"
 keywords = [ "distributed", "query", "data", "processing", "sql" ]
-repository = "https://github.com/datafusion-rs/datafusion"
+repository = "https://github.com/andygrove/datafusion"
 license = "Apache-2.0"
 include = [
     "src/**/*.rs",
     "Cargo.toml",
 ]
+edition = "2018"
 
 [lib]
 name = "datafusion"
 path = "src/lib.rs"
 
 [[bin]]
-name = "worker"
-path = "src/bin/worker/main.rs"
-
-[[bin]]
 name = "console"
 path = "src/bin/console/main.rs"
 
+#[[bin]]
+#name = "worker"
+#path = "src/bin/worker/main.rs"
+
 [dependencies]
-bytes = "0.4"
-byteorder = "1"
-fnv = "1.0.3"
-csv = "1.0.0"
-arrow = "0.10.0"
-
-lazy_static = "1.0"
-parquet = "0.4.1"
-#parquet = { path = "../parquet-rs" }
-json = "0.11.13"
+#byteorder = "1"
+#bytes = "0.4"
 clap = "2.31.2"
-
-sqlparser = "0.1.8"
-#sqlparser = { path = "../datafusion-sql" }
-
+#csv = "1.0.0"
+fnv = "1.0.3"
+#datafusion-arrow = { path = "../datafusion-arrow" }
+datafusion-arrow = "0.12.4"
 datafusion-rustyline = "2.0.0-alpha-20180628"
+#json = "0.11.13"
+#lazy_static = "1.0"
+#parquet = "0.4.1"
+serde = { version = "1.0.80", features = ["alloc", "rc"] }
+serde_derive = "1.0.80"
+serde_json = "1.0.33"
+
+sqlparser = "0.1.9"
 
 [dev-dependencies]
 criterion = "0.2.0"

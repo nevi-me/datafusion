@@ -17,17 +17,18 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::string::String;
+use std::sync::Arc;
 
-use super::logical::*;
-use super::types::*;
+use super::execution::error::*;
+use super::logicalplan::*;
 
 use arrow::datatypes::*;
 
 use sqlparser::sqlast::*;
 
 pub trait SchemaProvider {
-    fn get_table_meta(&self, name: &str) -> Option<Rc<Schema>>;
-    fn get_function_meta(&self, name: &str) -> Option<Rc<FunctionMeta>>;
+    fn get_table_meta(&self, name: &str) -> Option<Arc<Schema>>;
+    fn get_function_meta(&self, name: &str) -> Option<Arc<FunctionMeta>>;
 }
 
 /// SQL query planner
@@ -42,7 +43,7 @@ impl SqlToRel {
     }
 
     /// Generate a logic plan from a SQL AST node
-    pub fn sql_to_rel(&self, sql: &ASTNode) -> Result<Rc<LogicalPlan>, String> {
+    pub fn sql_to_rel(&self, sql: &ASTNode) -> Result<Rc<LogicalPlan>> {
         match sql {
             &ASTNode::SQLSelect {
                 ref projection,
@@ -58,7 +59,7 @@ impl SqlToRel {
                 let input = match relation {
                     &Some(ref r) => self.sql_to_rel(r)?,
                     &None => Rc::new(LogicalPlan::EmptyRelation {
-                        schema: Rc::new(Schema::empty()),
+                        schema: Arc::new(Schema::empty()),
                     }),
                 };
 
@@ -73,7 +74,10 @@ impl SqlToRel {
                     _ => None,
                 };
 
-                let expr = self.project(projection, input_schema)?;
+                let expr: Vec<Expr> = projection
+                    .iter()
+                    .map(|e| self.sql_to_rex(&e, &input_schema))
+                    .collect::<Result<Vec<Expr>>>()?;
 
                 // collect aggregate expressions
                 let aggr_expr: Vec<Expr> = expr
@@ -95,7 +99,7 @@ impl SqlToRel {
                         Some(gbe) => gbe
                             .iter()
                             .map(|e| self.sql_to_rex(&e, &input_schema))
-                            .collect::<Result<Vec<Expr>, String>>()?,
+                            .collect::<Result<Vec<Expr>>>()?,
                         None => vec![],
                     };
                     //println!("GROUP BY: {:?}", group_expr);
@@ -110,7 +114,7 @@ impl SqlToRel {
                         input: aggregate_input,
                         group_expr,
                         aggr_expr,
-                        schema: Rc::new(aggr_schema),
+                        schema: Arc::new(aggr_schema),
                     }))
                 } else {
                     let projection_input: Rc<LogicalPlan> = match selection_plan {
@@ -118,7 +122,7 @@ impl SqlToRel {
                         _ => input.clone(),
                     };
 
-                    let projection_schema = Rc::new(Schema::new(exprlist_to_fields(
+                    let projection_schema = Arc::new(Schema::new(exprlist_to_fields(
                         &expr,
                         input_schema.as_ref(),
                     )));
@@ -130,20 +134,23 @@ impl SqlToRel {
                     };
 
                     if let &Some(_) = having {
-                        return Err(String::from("HAVING is not implemented yet"));
+                        return Err(ExecutionError::General(
+                            "HAVING is not implemented yet".to_string(),
+                        ));
                     }
 
                     let order_by_plan = match order_by {
                         &Some(ref order_by_expr) => {
                             let input_schema = projection.schema();
-                            let order_by_rex: Result<Vec<Expr>, String> = order_by_expr
+                            let order_by_rex: Result<Vec<Expr>> = order_by_expr
                                 .iter()
                                 .map(|e| {
                                     Ok(Expr::Sort {
-                                        expr: Rc::new(self.sql_to_rex(&e.expr, &input_schema).unwrap()),
-                                        asc: e.asc
+                                        expr: Rc::new(
+                                            self.sql_to_rex(&e.expr, &input_schema).unwrap(),
+                                        ),
+                                        asc: e.asc,
                                     })
-
                                 })
                                 .collect();
 
@@ -160,7 +167,11 @@ impl SqlToRel {
                         &Some(ref limit_ast_node) => {
                             let limit_count = match **limit_ast_node {
                                 ASTNode::SQLValue(sqlparser::sqlast::Value::Long(n)) => n,
-                                _ => return Err(String::from("LIMIT parameter is not a number")),
+                                _ => {
+                                    return Err(ExecutionError::General(String::from(
+                                        "LIMIT parameter is not a number",
+                                    )))
+                                }
                             };
                             LogicalPlan::Limit {
                                 limit: limit_count as usize,
@@ -183,34 +194,41 @@ impl SqlToRel {
                         schema: schema.clone(),
                         projection: None,
                     })),
-                    None => Err(format!("no schema found for table {}", id)),
+                    None => Err(ExecutionError::General(format!(
+                        "no schema found for table {}",
+                        id
+                    ))),
                 }
             }
 
-            _ => Err(format!(
+            _ => Err(ExecutionError::ExecutionError(format!(
                 "sql_to_rel does not support this relation: {:?}",
                 sql
-            )),
+            ))),
         }
     }
 
     /// Generate a relational expression from a SQL expression
-    pub fn sql_to_rex(&self, sql: &ASTNode, schema: &Schema) -> Result<Expr, String> {
+    pub fn sql_to_rex(&self, sql: &ASTNode, schema: &Schema) -> Result<Expr> {
         match sql {
-            &ASTNode::SQLValue(sqlparser::sqlast::Value::Long(n)) => Ok(Expr::Literal(ScalarValue::Int64(n))),
-            &ASTNode::SQLValue(sqlparser::sqlast::Value::Double(n)) => Ok(Expr::Literal(ScalarValue::Float64(n))),
+            &ASTNode::SQLValue(sqlparser::sqlast::Value::Long(n)) => {
+                Ok(Expr::Literal(ScalarValue::Int64(n)))
+            }
+            &ASTNode::SQLValue(sqlparser::sqlast::Value::Double(n)) => {
+                Ok(Expr::Literal(ScalarValue::Float64(n)))
+            }
             &ASTNode::SQLValue(sqlparser::sqlast::Value::SingleQuotedString(ref s)) => {
                 Ok(Expr::Literal(ScalarValue::Utf8(Rc::new(s.clone()))))
             }
 
             &ASTNode::SQLIdentifier(ref id) => {
-                match schema.columns().iter().position(|c| c.name().eq(id)) {
+                match schema.fields().iter().position(|c| c.name().eq(id)) {
                     Some(index) => Ok(Expr::Column(index)),
-                    None => Err(format!(
+                    None => Err(ExecutionError::ExecutionError(format!(
                         "Invalid identifier '{}' for schema {}",
                         id,
                         schema.to_string()
-                    )),
+                    ))),
                 }
             }
 
@@ -225,7 +243,7 @@ impl SqlToRel {
                 ref data_type,
             } => Ok(Expr::Cast {
                 expr: Rc::new(self.sql_to_rex(&expr, schema)?),
-                data_type: convert_data_type(data_type),
+                data_type: convert_data_type(data_type)?,
             }),
 
             &ASTNode::SQLIsNull(ref expr) => {
@@ -255,6 +273,7 @@ impl SqlToRel {
                     &SQLOperator::Modulus => Operator::Modulus,
                     &SQLOperator::And => Operator::And,
                     &SQLOperator::Or => Operator::Or,
+                    &SQLOperator::Like => Operator::Like,
                 };
 
                 let left_expr = self.sql_to_rex(&left, &schema)?;
@@ -269,20 +288,19 @@ impl SqlToRel {
                         right: Rc::new(right_expr.cast_to(&supertype, schema)?),
                     }),
                     None => {
-                        return Err(format!(
+                        return Err(ExecutionError::General(format!(
                             "No common supertype found for binary operator {:?} \
                              with input types {:?} and {:?}",
                             operator, left_type, right_type
-                        ))
+                        )))
                     }
                 }
             }
 
-//            &ASTNode::SQLOrderBy { ref expr, asc } => Ok(Expr::Sort {
-//                expr: Rc::new(self.sql_to_rex(&expr, &schema)?),
-//                asc,
-//            }),
-
+            //            &ASTNode::SQLOrderBy { ref expr, asc } => Ok(Expr::Sort {
+            //                expr: Rc::new(self.sql_to_rex(&expr, &schema)?),
+            //                asc,
+            //            }),
             &ASTNode::SQLFunction { ref id, ref args } => {
                 //TODO: fix this hack
                 match id.to_lowercase().as_ref() {
@@ -290,7 +308,7 @@ impl SqlToRel {
                         let rex_args = args
                             .iter()
                             .map(|a| self.sql_to_rex(a, schema))
-                            .collect::<Result<Vec<Expr>, String>>()?;
+                            .collect::<Result<Vec<Expr>>>()?;
 
                         // return type is same as the argument type for these aggregate functions
                         let return_type = rex_args[0].get_type(schema).clone();
@@ -306,11 +324,13 @@ impl SqlToRel {
                             .iter()
                             .map(|a| match a {
                                 // this feels hacky but translate COUNT(1)/COUNT(*) to COUNT(first_column)
-                                ASTNode::SQLValue(sqlparser::sqlast::Value::Long(1)) => Ok(Expr::Column(0)),
+                                ASTNode::SQLValue(sqlparser::sqlast::Value::Long(1)) => {
+                                    Ok(Expr::Column(0))
+                                }
                                 ASTNode::SQLWildcard => Ok(Expr::Column(0)),
                                 _ => self.sql_to_rex(a, schema),
                             })
-                            .collect::<Result<Vec<Expr>, String>>()?;
+                            .collect::<Result<Vec<Expr>>>()?;
 
                         Ok(Expr::AggregateFunction {
                             name: id.clone(),
@@ -323,7 +343,7 @@ impl SqlToRel {
                             let rex_args = args
                                 .iter()
                                 .map(|a| self.sql_to_rex(a, schema))
-                                .collect::<Result<Vec<Expr>, String>>()?;
+                                .collect::<Result<Vec<Expr>>>()?;
 
                             let mut safe_args: Vec<Expr> = vec![];
                             for i in 0..rex_args.len() {
@@ -337,57 +357,42 @@ impl SqlToRel {
                                 return_type: fm.return_type().clone(),
                             })
                         }
-                        _ => Err(format!("Invalid function '{}'", id)),
+                        _ => Err(ExecutionError::General(format!(
+                            "Invalid function '{}'",
+                            id
+                        ))),
                     },
                 }
             }
 
-            _ => Err(String::from(format!(
+            _ => Err(ExecutionError::General(format!(
                 "Unsupported ast node {:?} in sqltorel",
                 sql
             ))),
         }
     }
-
-    /// Calculates the projection expressions given
-    fn project(&self, projection: &Vec<ASTNode>, input_schema: &Rc<Schema>) -> Result<Vec<Expr>, String> {
-        let expr: Vec<Expr> = projection
-            .iter()
-            .flat_map(|e| {
-                match *e {
-                    ASTNode::SQLWildcard => {
-                        input_schema.columns()
-                            .iter()
-                            .enumerate()
-                            .map(|(i, _)| Expr::Column(i))
-                            .collect()
-                    },
-                    _ => vec![self.sql_to_rex(&e, &input_schema).unwrap()],
-                }
-            })
-            .collect::<Vec<Expr>>();
-
-        Ok(expr)
-    }
 }
 
 /// Convert SQL data type to relational representation of data type
-pub fn convert_data_type(sql: &SQLType) -> DataType {
+pub fn convert_data_type(sql: &SQLType) -> Result<DataType> {
     match sql {
-        SQLType::Boolean => DataType::Boolean,
-        SQLType::SmallInt => DataType::Int16,
-        SQLType::Int => DataType::Int32,
-        SQLType::BigInt => DataType::Int64,
-        SQLType::Float(_) | SQLType::Real => DataType::Float64,
-        SQLType::Double => DataType::Float64,
-        SQLType::Char(_) | SQLType::Varchar(_) => DataType::Utf8,
-        _ => unimplemented!()
+        SQLType::Boolean => Ok(DataType::Boolean),
+        SQLType::SmallInt => Ok(DataType::Int16),
+        SQLType::Int => Ok(DataType::Int32),
+        SQLType::BigInt => Ok(DataType::Int64),
+        SQLType::Float(_) | SQLType::Real => Ok(DataType::Float64),
+        SQLType::Double => Ok(DataType::Float64),
+        SQLType::Char(_) | SQLType::Varchar(_) => Ok(DataType::Utf8),
+        other => Err(ExecutionError::NotImplemented(format!(
+            "Unsupported SQL type {:?}",
+            other
+        ))),
     }
 }
 
 pub fn expr_to_field(e: &Expr, input_schema: &Schema) -> Field {
     match e {
-        Expr::Column(i) => input_schema.columns()[*i].clone(),
+        Expr::Column(i) => input_schema.fields()[*i].clone(),
         Expr::Literal(ref lit) => Field::new("lit", lit.get_datatype(), true),
         Expr::ScalarFunction {
             ref name,
@@ -495,35 +500,35 @@ pub fn push_down_projection(
             schema: schema.clone(),
             projection: Some(projection.iter().cloned().collect()),
         }),
-        LogicalPlan::CsvFile {
-            ref filename,
-            ref schema,
-            ref has_header,
-            ..
-        } => Rc::new(LogicalPlan::CsvFile {
-            filename: filename.to_string(),
-            schema: schema.clone(),
-            has_header: *has_header,
-            projection: Some(projection.iter().cloned().collect()),
-        }),
-        LogicalPlan::NdJsonFile {
-            ref filename,
-            ref schema,
-            ..
-        } => Rc::new(LogicalPlan::NdJsonFile {
-            filename: filename.to_string(),
-            schema: schema.clone(),
-            projection: Some(projection.iter().cloned().collect()),
-        }),
-        LogicalPlan::ParquetFile {
-            ref filename,
-            ref schema,
-            ..
-        } => Rc::new(LogicalPlan::ParquetFile {
-            filename: filename.to_string(),
-            schema: schema.clone(),
-            projection: Some(projection.iter().cloned().collect()),
-        }),
+        //        LogicalPlan::CsvFile {
+        //            ref filename,
+        //            ref schema,
+        //            ref has_header,
+        //            ..
+        //        } => Rc::new(LogicalPlan::CsvFile {
+        //            filename: filename.to_string(),
+        //            schema: schema.clone(),
+        //            has_header: *has_header,
+        //            projection: Some(projection.iter().cloned().collect()),
+        //        }),
+        //        LogicalPlan::NdJsonFile {
+        //            ref filename,
+        //            ref schema,
+        //            ..
+        //        } => Rc::new(LogicalPlan::NdJsonFile {
+        //            filename: filename.to_string(),
+        //            schema: schema.clone(),
+        //            projection: Some(projection.iter().cloned().collect()),
+        //        }),
+        //        LogicalPlan::ParquetFile {
+        //            ref filename,
+        //            ref schema,
+        //            ..
+        //        } => Rc::new(LogicalPlan::ParquetFile {
+        //            filename: filename.to_string(),
+        //            schema: schema.clone(),
+        //            projection: Some(projection.iter().cloned().collect()),
+        //        }),
         LogicalPlan::Projection { .. } => plan.clone(),
         LogicalPlan::Limit { .. } => plan.clone(),
         LogicalPlan::Sort { .. } => plan.clone(),
@@ -534,8 +539,8 @@ pub fn push_down_projection(
 #[cfg(test)]
 mod tests {
 
-    use sqlparser::sqlparser::*;
     use super::*;
+    use sqlparser::sqlparser::*;
 
     #[test]
     fn select_no_relation() {
@@ -699,14 +704,6 @@ mod tests {
         assert!(accum.contains(&3));
     }
 
-    #[test]
-    fn test_wildcard_projections() {
-        let sql = "SELECT * FROM person";
-        let expected = "Projection: #0, #1, #2, #3, #4, #5\
-                    \n  TableScan: person projection=None";
-        quick_test(sql, expected);
-    }
-
     //TODO fix
     //    #[test]
     //    fn test_push_down_projection_aggregate_query() {
@@ -752,7 +749,7 @@ mod tests {
     /// Create logical plan, write with formatter, compare to expected output
     fn quick_test(sql: &str, expected: &str) {
         use sqlparser::dialect::*;
-        let dialect = GenericSqlDialect{};
+        let dialect = GenericSqlDialect {};
         let planner = SqlToRel::new(Rc::new(MockSchemaProvider {}));
         let ast = Parser::parse_sql(&dialect, sql.to_string()).unwrap();
         let plan = planner.sql_to_rel(&ast).unwrap();
@@ -762,9 +759,9 @@ mod tests {
     struct MockSchemaProvider {}
 
     impl SchemaProvider for MockSchemaProvider {
-        fn get_table_meta(&self, name: &str) -> Option<Rc<Schema>> {
+        fn get_table_meta(&self, name: &str) -> Option<Arc<Schema>> {
             match name {
-                "person" => Some(Rc::new(Schema::new(vec![
+                "person" => Some(Arc::new(Schema::new(vec![
                     Field::new("id", DataType::UInt32, false),
                     Field::new("first_name", DataType::Utf8, false),
                     Field::new("last_name", DataType::Utf8, false),
@@ -776,9 +773,9 @@ mod tests {
             }
         }
 
-        fn get_function_meta(&self, name: &str) -> Option<Rc<FunctionMeta>> {
+        fn get_function_meta(&self, name: &str) -> Option<Arc<FunctionMeta>> {
             match name {
-                "sqrt" => Some(Rc::new(FunctionMeta::new(
+                "sqrt" => Some(Arc::new(FunctionMeta::new(
                     "sqrt".to_string(),
                     vec![Field::new("n", DataType::Float64, false)],
                     DataType::Float64,
